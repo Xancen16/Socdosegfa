@@ -5,7 +5,7 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# --- БАЗА ДАННЫХ (ORM) ---
+# --- БАЗА ДАННЫХ ---
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///game_analyzer.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -14,7 +14,7 @@ db = SQLAlchemy(app)
 class UserActivity(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(100))
-    last_store = db.Column(db.String(50))  # Контекст: какой магазин смотрел последним
+    last_store = db.Column(db.String(50))
     query_time = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -34,7 +34,7 @@ with app.app_context():
         db.session.commit()
 
 
-def fetch_games(store_id, min_savings=50):
+def fetch_games(store_id):
     try:
         url = f"https://www.cheapshark.com/api/1.0/deals?storeID={store_id}&onSale=1&pageSize=3"
         data = requests.get(url, timeout=3).json()
@@ -44,13 +44,26 @@ def fetch_games(store_id, min_savings=50):
         return "Сервис цен временно недоступен."
 
 
+def save_activity(uid, store):
+    try:
+        new_act = UserActivity(user_id=uid, last_store=store)
+        db.session.add(new_act)
+        db.session.commit()
+    except:
+        db.session.rollback()
+
+
 # --- ОБРАБОТКА ЗАПРОСОВ АЛИСЫ ---
 
 @app.route('/post', methods=['POST'])
 def main():
     req = request.json
-    user_id = req['session']['user_id']
-    command = req['request']['command'].lower()
+
+    session = req.get('session', {})
+    user_id = session.get('user', {}).get('user_id') or \
+              session.get('application', {}).get('application_id', 'anonymous')
+
+    command = req.get('request', {}).get('command', '').lower()
 
     res_text = ""
     buttons = [
@@ -58,32 +71,32 @@ def main():
         {"title": "Цены в Epic Games", "hide": True},
         {"title": "Когда распродажа?", "hide": True}
     ]
-    user_record = UserActivity.query.filter_by(user_id=user_id).order_by(UserActivity.query_time.desc()).first()
 
-    if req['session']['new']:
+    if session.get('new'):
+        user_record = UserActivity.query.filter_by(user_id=user_id).order_by(UserActivity.query_time.desc()).first()
         if user_record:
-            res_text = f"С возвращением! В прошлый раз ты проверял {user_record.last_store}. Посмотрим снова или выберем другой?"
+            res_text = f"С возвращением! В прошлый раз ты смотрел {user_record.last_store}. Повторим поиск?"
         else:
             res_text = "Привет! Я проанализирую цены в Steam и Epic Games. Где ищем скидки?"
-
     elif "стим" in command or "steam" in command:
-        res_text = f"Анализирую Steam... Вот лучшие предложения:\n{fetch_games(1)}"
+        res_text = f"В Steam сейчас такие предложения:\n{fetch_games(1)}"
         save_activity(user_id, "Steam")
-
     elif "эпик" in command or "epic" in command:
         res_text = f"В Epic Games Store сейчас выгодно:\n{fetch_games(25)}"
         save_activity(user_id, "Epic Games")
-
-    elif "когда" in command or "расписание" in command:
-        event = SaleCalendar.query.first()  # Берем ближайшее из БД
-        res_text = f"Ближайший крупный ивент: {event.event_name} в {event.store}. Начнется {event.start_date}."
-
+    elif "когда" in command or "распродажа" in command:
+        event = SaleCalendar.query.first()
+        res_text = f"Ближайший ивент: {event.event_name} в {event.store}. Начнется {event.start_date}."
     else:
         res_text = "Я могу сравнить цены в Steam и Epic Games. Просто нажми на кнопку!"
 
     return jsonify({
-        "session": req["session"],
-        "version": req["version"],
+        "version": req.get("version", "1.0"),
+        "session": {
+            "session_id": session.get("session_id"),
+            "message_id": session.get("message_id"),
+            "user_id": session.get("user_id")
+        },
         "response": {
             "text": res_text,
             "buttons": buttons,
@@ -92,11 +105,5 @@ def main():
     })
 
 
-def save_activity(uid, store):
-    new_act = UserActivity(user_id=uid, last_store=store)
-    db.session.add(new_act)
-    db.session.commit()
-
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000)blinker==1.9.0
