@@ -1,94 +1,188 @@
 import requests
+import logging
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
+from datetime import datetime, date
+from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 
-# --- БАЗА ДАННЫХ ---
+@app.after_request
+def add_header(response):
+    response.headers['ngrok-skip-browser-warning'] = 'true'
+    return response
+
+logging.basicConfig(level=logging.INFO)
+handler = RotatingFileHandler('skill.log', maxBytes=10000, backupCount=1)
+handler.setFormatter(logging.Formatter(
+    '[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+))
+app.logger.addHandler(handler)
+
+# --- БАЗА ДАННЫХ (ORM) ---
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///game_analyzer.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
-
 class UserActivity(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.String(100))
+    user_id = db.Column(db.String(100), index=True)
     last_store = db.Column(db.String(50))
+    last_query = db.Column(db.String(100))
     query_time = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 class SaleCalendar(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     store = db.Column(db.String(50))
     event_name = db.Column(db.String(100))
     start_date = db.Column(db.Date)
+    is_confirmed = db.Column(db.Boolean, default=False)
 
-
+# Создание таблиц и первичных данных
 with app.app_context():
     db.create_all()
     if not SaleCalendar.query.first():
-        event = SaleCalendar(store="Steam", event_name="Летняя распродажа",
-                             start_date=datetime(2026, 6, 25).date())
-        db.session.add(event)
+        events = [
+            SaleCalendar(store="Steam", event_name="Летняя распродажа",
+                         start_date=date(2026, 6, 25), is_confirmed=True),
+            SaleCalendar(store="Epic Games", event_name="Мегараспродажа",
+                         start_date=date(2026, 5, 14), is_confirmed=False)
+        ]
+        db.session.bulk_save_objects(events)
         db.session.commit()
 
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
-def fetch_games(store_id):
+def get_store_name(store_id):
+    stores = {
+        "1": "Steam",
+        "25": "Epic Games Store",
+        "2": "GOG",
+        "3": "Humble Store",
+        "7": "GOG (Direct)"
+    }
+    return stores.get(str(store_id), "Unknown Store")
+
+def fetch_top_deals(store_id):
     try:
-        url = f"https://www.cheapshark.com/api/1.0/deals?storeID={store_id}&onSale=1&pageSize=3"
-        data = requests.get(url, timeout=3).json()
-        if not data: return "Скидок пока нет."
-        return "\n".join([f"• {g['title']}: ${g['salePrice']} (-{round(float(g['savings']))}%)" for g in data])
-    except:
-        return "Сервис цен временно недоступен."
+        url = f"https://www.cheapshark.com/api/1.0/deals?storeID={store_id}&onSale=1&pageSize=5"
+        response = requests.get(url, timeout=5)
+        if response.status_code != 200:
+            return "Не удалось связаться с сервером цен."
 
+        data = response.json()
+        if not data:
+            return "Скидок в этом магазине сейчас нет."
 
-def save_activity(uid, store):
+        lines = [f"Топ скидок в {get_store_name(store_id)}:"]
+        for g in data:
+            title = g.get('title', 'Unknown')
+            price = g.get('salePrice', '0')
+            savings = round(float(g.get('savings', 0)))
+            lines.append(f"• {title}: ${price} (-{savings}%)")
+        return "\n".join(lines)
+    except Exception as e:
+        app.logger.error(f"API Error: {e}")
+        return "Ошибка при получении данных."
+
+def search_game_price(game_name):
     try:
-        new_act = UserActivity(user_id=uid, last_store=store)
+        url = f"https://www.cheapshark.com/api/1.0/games?title={game_name}&limit=1"
+        search_res = requests.get(url, timeout=5).json()
+        if not search_res:
+            return f"К сожалению, я не нашла игру '{game_name}'."
+
+        game_id = search_res[0]['gameID']
+        detail_url = f"https://www.cheapshark.com/api/1.0/games?id={game_id}"
+        details = requests.get(detail_url, timeout=5).json()
+
+        best_deal = details['deals'][0]
+        store = get_store_name(best_deal['storeID'])
+        price = best_deal['price']
+
+        return f"Самое выгодное предложение на {game_name}: в {store} за ${price}."
+    except Exception as e:
+        app.logger.error(f"Search Error: {e}")
+        return "Произошла ошибка при поиске игры."
+
+def save_user_action(uid, store=None, query=None):
+    try:
+        new_act = UserActivity(user_id=uid, last_store=store, last_query=query)
         db.session.add(new_act)
         db.session.commit()
-    except:
+    except Exception as e:
+        app.logger.error(f"DB Error: {e}")
         db.session.rollback()
 
-
-# --- ОБРАБОТКА ЗАПРОСОВ АЛИСЫ ---
+# --- ОБРАБОТЧИК АЛИСЫ ---
 
 @app.route('/post', methods=['POST'])
 def main():
     req = request.json
+    app.logger.info(f"Request: {req}")
 
     session = req.get('session', {})
+    request_data = req.get('request', {})
+
+    # Получение ID пользователя
     user_id = session.get('user', {}).get('user_id') or \
               session.get('application', {}).get('application_id', 'anonymous')
 
-    command = req.get('request', {}).get('command', '').lower()
+    command = request_data.get('command', '').lower().strip()
 
-    res_text = ""
     buttons = [
-        {"title": "Цены в Steam", "hide": True},
-        {"title": "Цены в Epic Games", "hide": True},
-        {"title": "Когда распродажа?", "hide": True}
+        {"title": "Steam", "hide": True},
+        {"title": "Epic Games", "hide": True},
+        {"title": "Распродажи", "hide": True},
+        {"title": "Помощь", "hide": True}
     ]
 
+    res_text = ""
+
     if session.get('new'):
-        user_record = UserActivity.query.filter_by(user_id=user_id).order_by(UserActivity.query_time.desc()).first()
-        if user_record:
-            res_text = f"С возвращением! В прошлый раз ты смотрел {user_record.last_store}. Повторим поиск?"
+        last_visit = UserActivity.query.filter_by(user_id=user_id).order_by(UserActivity.query_time.desc()).first()
+        if last_visit:
+            # Напоминаем о последнем действии
+            context = last_visit.last_store or last_visit.last_query or "поиском игр"
+            res_text = f"С возвращением! Снова ищем скидки? В прошлый раз ты интересовался: {context}."
         else:
-            res_text = "Привет! Я проанализирую цены в Steam и Epic Games. Где ищем скидки?"
-    elif "стим" in command or "steam" in command:
-        res_text = f"В Steam сейчас такие предложения:\n{fetch_games(1)}"
-        save_activity(user_id, "Steam")
-    elif "эпик" in command or "epic" in command:
-        res_text = f"В Epic Games Store сейчас выгодно:\n{fetch_games(25)}"
-        save_activity(user_id, "Epic Games")
-    elif "когда" in command or "распродажа" in command:
-        event = SaleCalendar.query.first()
-        res_text = f"Ближайший ивент: {event.event_name} в {event.store}. Начнется {event.start_date}."
+            res_text = "Привет! Я Анализатор Цен. Могу показать скидки в Steam, Epic Games или найти цену на конкретную игру. С чего начнем?"
+
+    elif not command:
+        res_text = "Я тебя слушаю! Можно выбрать магазин на кнопках или просто сказать название игры."
+
+    elif any(word in command for word in ["стим", "steam"]):
+        res_text = fetch_top_deals(1)
+        save_user_action(user_id, store="Steam")
+
+    elif any(word in command for word in ["эпик", "epic", "егс", "egs"]):
+        res_text = fetch_top_deals(25)
+        save_user_action(user_id, store="Epic Games Store")
+
+    elif any(word in command for word in ["когда", "распродажа", "календарь", "скидки будут"]):
+        events = SaleCalendar.query.order_by(SaleCalendar.start_date).all()
+        event_list = []
+        for e in events:
+            status = "(подтверждено)" if e.is_confirmed else "(прогноз)"
+            event_list.append(f"• {e.store}: {e.event_name} — {e.start_date.strftime('%d.%m')} {status}")
+        res_text = "Расписание ближайших распродаж:\n" + "\n".join(event_list)
+
+    elif "помощь" in command or "что ты умеешь" in command:
+        res_text = ("Я умею:\n"
+                    "1. Показывать топ скидок в Steam и Epic Games.\n"
+                    "2. Искать минимальную цену на игру.\n"
+                    "3. Подсказывать даты крупных распродаж.")
+
+    elif "найди" in command or "поиск" in command or len(command.split()) <= 3:
+        search_term = command.replace("найди", "").replace("поиск", "").strip()
+        if not search_term:
+            res_text = "Какую игру мне найти?"
+        else:
+            res_text = search_game_price(search_term)
+            save_user_action(user_id, query=search_term)
+
     else:
-        res_text = "Я могу сравнить цены в Steam и Epic Games. Просто нажми на кнопку!"
+        res_text = "Пока я не знаю такой команды. Попробуй выбрать магазин или назови игру."
 
     return jsonify({
         "version": req.get("version", "1.0"),
@@ -104,6 +198,15 @@ def main():
         }
     })
 
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        "version": "1.0",
+        "response": {
+            "text": "Произошла внутренняя ошибка сервера. Попробуйте позже.",
+            "end_session": False
+        }
+    }), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)blinker==1.9.0
+    app.run(host='0.0.0.0', port=5000, debug=False)
