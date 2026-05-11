@@ -12,6 +12,22 @@ from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 
+URL_CONFIG = {
+    "deals_api": "https://www.cheapshark.com/api/1.0/deals",
+    "games_api": "https://www.cheapshark.com/api/1.0/games",
+    "stores_api": "https://www.cheapshark.com/api/1.0/stores",
+    "currency_api": "https://www.cbr-xml-daily.ru/daily_json.js" # Ссылка на курс ЦБ РФ
+}
+
+def get_usd_rate():
+    try:
+        response = requests.get(URL_CONFIG["currency_api"], timeout=5)
+        data = response.json()
+        return data['Valute']['USD']['Value']
+    except Exception as e:
+        app.logger.error(f"Ошибка получения курса: {e}")
+        return 92.0
+
 
 @app.after_request
 def fix_ngrok(res): # траблы ngrok
@@ -120,7 +136,8 @@ def clean_user_text(raw_text): # очистка от слов
 
 def get_deals_by_store(store_id): # топ 10 скидок из магаза
     try:
-        api_url = f"https://www.cheapshark.com/api/1.0/deals?storeID={store_id}&onSale=1&pageSize=10"
+        usd_rate = get_usd_rate()  # Получаем текущий курс
+        api_url = f"{URL_CONFIG['deals_api']}?storeID={store_id}&onSale=1&pageSize=10"
         resp = requests.get(api_url, timeout=7)
         if resp.status_code != 200:
             return "Техническая задержка на сервере. Повторите попытку позже."
@@ -130,16 +147,17 @@ def get_deals_by_store(store_id): # топ 10 скидок из магаза
             return "В данном магазине на текущий момент нет активных акций."
 
         name = get_real_store_name(store_id)
-        msg = [f"Актуальные предложения из {name}:"]
+        msg = [f"Актуальные предложения из {name} (курс: {round(usd_rate, 2)} руб):"]
 
-        for item in raw_list[:6]:
+        for item in raw_list[:10]:
             t = item.get('title', 'Без названия')
             curr = item.get('salePrice', '0')
+            curr_rub = round(curr * usd_rate)
             proc = round(float(item.get('savings', 0)))
             if proc > 0:
-                msg.append(f"- {t}: {curr} USD (скидка {proc} процентов)")
+                msg.append(f"- {t}: {curr} Руб (скидка {proc} процентов)")
             else:
-                msg.append(f"- {t}: {curr} USD")
+                msg.append(f"- {t}: {curr} Руб")
 
         return "\n".join(msg)
     except Exception as err:
@@ -158,7 +176,8 @@ def fetch_game_data(title):
             return json.loads(c_check.json_data).get('val')
 
     try:
-        search_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?title={title}&limit=1", timeout=6) # ID игры
+        usd_rate = get_usd_rate()
+        search_r = requests.get(f"{URL_CONFIG['games_api']}?title={title}&limit=1", timeout=6) # ID игры
         if search_r.status_code != 200:
             return "Сервер поиска недоступен. Попробуйте через некоторое время."
 
@@ -169,7 +188,7 @@ def fetch_game_data(title):
         g_id = s_data[0]['gameID']
         full_t = s_data[0]['external']
 
-        d_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?id={g_id}", timeout=6) # цена
+        d_r = requests.get(f"{URL_CONFIG['games_api']}?id={g_id}", timeout=6) # цена
         d_data = d_r.json()
 
         if not d_data or 'deals' not in d_data:
@@ -177,9 +196,9 @@ def fetch_game_data(title):
 
         best = d_data['deals'][0]
         s_name = get_real_store_name(best['storeID'])
-        p = best['price']
+        p = round(usd_rate * best['price'])
 
-        out = f"Информация по игре {full_t}\nЛучшая цена зафиксирована в {s_name}\nТекущая стоимость составляет {p} USD"
+        out = f"Информация по игре {full_t}\nЛучшая цена зафиксирована в {s_name}\nТекущая стоимость составляет {p} Руб"
 
         if c_check:
             c_check.json_data = json.dumps({'val': out})
@@ -433,9 +452,8 @@ def check_db_health():
         return False
 
 def verify_api_keys():
-    test_url = "https://www.cheapshark.com/api/1.0/stores"
     try:
-        return requests.get(test_url, timeout=3).status_code == 200
+        return requests.get(URL_CONFIG["stores_api"], timeout=3).status_code == 200
     except:
         return False
 
@@ -467,7 +485,7 @@ def handle_timeout():
 
 def sync_stores():
     try:
-        r = requests.get("https://www.cheapshark.com/api/1.0/stores")
+        r = requests.get(URL_CONFIG["stores_api"])
         if r.status_code == 200:
             app.logger.info("Список магазинов синхронизирован")
     except:
