@@ -14,14 +14,14 @@ app = Flask(__name__)
 
 
 @app.after_request
-def fix_ngrok(res):
+def fix_ngrok(res): # траблы ngrok
     res.headers['ngrok-skip-browser-warning'] = 'true'
     res.headers['Access-Control-Allow-Origin'] = '*'
     res.headers['X-Content-Type-Options'] = 'nosniff'
     return res
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO) # логи
 log_path = 'skill_v2_final.log'
 h = RotatingFileHandler(log_path, maxBytes=100000, backupCount=5)
 f = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
@@ -33,7 +33,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.urandom(24)
 db = SQLAlchemy(app)
 
-
+# таблицы в БД
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     uid = db.Column(db.String(128), index=True, unique=True)
@@ -41,8 +41,8 @@ class User(db.Model):
     last_query = db.Column(db.String(256))
     sessions_count = db.Column(db.Integer, default=1)
     last_seen = db.Column(db.DateTime, default=datetime.utcnow)
-    is_premium = db.Column(db.Boolean, default=False)
-    user_level = db.Column(db.Integer, default=1)
+    is_premium = db.Column(db.Boolean, default=False) # на будущее
+    user_level = db.Column(db.Integer, default=1) # на будущее
     total_requests = db.Column(db.Integer, default=0)
 
 
@@ -62,10 +62,10 @@ class PriceCache(db.Model):
     search_key = db.Column(db.String(256), index=True)
     json_data = db.Column(db.Text)
     created_at = db.Column(db.Float, default=time.time)
-    expires_at = db.Column(db.Float)
+    expires_at = db.Column(db.Float) # на всякий
 
 
-class Blacklist(db.Model):
+class Blacklist(db.Model): # цензура в будущем
     id = db.Column(db.Integer, primary_key=True)
     word = db.Column(db.String(64))
 
@@ -77,7 +77,7 @@ class AppStat(db.Model):
 
 
 with app.app_context():
-    db.create_all()
+    db.create_all() # создание таблиц
     if not Sales.query.first():
         curr_y = 2026
         init_sales = [
@@ -105,7 +105,7 @@ def get_real_store_name(id_val):
     return s_map.get(str(id_val), "Неизвестный магазин")
 
 
-def clean_user_text(raw_text):
+def clean_user_text(raw_text): # очистка от слов
     noise = [
         "найди", "пожалуйста", "алиса", "скажи", "поиск",
         "сколько", "стоит", "купить", "игру", "хочу", "запусти",
@@ -118,7 +118,7 @@ def clean_user_text(raw_text):
     return res
 
 
-def get_deals_by_store(store_id):
+def get_deals_by_store(store_id): # топ 10 скидок из магаза
     try:
         api_url = f"https://www.cheapshark.com/api/1.0/deals?storeID={store_id}&onSale=1&pageSize=10"
         resp = requests.get(api_url, timeout=7)
@@ -154,11 +154,11 @@ def fetch_game_data(title):
 
     c_check = PriceCache.query.filter_by(search_key=title).first()
     if c_check:
-        if (time.time() - c_check.created_at) < 14400:
+        if (time.time() - c_check.created_at) < 14400: # 4 часа
             return json.loads(c_check.json_data).get('val')
 
     try:
-        search_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?title={title}&limit=1", timeout=6)
+        search_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?title={title}&limit=1", timeout=6) # ID игры
         if search_r.status_code != 200:
             return "Сервер поиска недоступен. Попробуйте через некоторое время."
 
@@ -169,7 +169,7 @@ def fetch_game_data(title):
         g_id = s_data[0]['gameID']
         full_t = s_data[0]['external']
 
-        d_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?id={g_id}", timeout=6)
+        d_r = requests.get(f"https://www.cheapshark.com/api/1.0/games?id={g_id}", timeout=6) # цена
         d_data = d_r.json()
 
         if not d_data or 'deals' not in d_data:
@@ -195,7 +195,7 @@ def fetch_game_data(title):
         return "Произошла системная ошибка при обработке данных."
 
 
-def update_user_stat(user_id, st=None, q=None):
+def update_user_stat(user_id, st=None, q=None): # статистика юзера
     try:
         u = User.query.filter_by(uid=user_id).first()
         if u:
@@ -213,7 +213,7 @@ def update_user_stat(user_id, st=None, q=None):
         db.session.rollback()
 
 
-def build_alice_json(req, text, buttons=None, end=False):
+def build_alice_json(req, text, buttons=None, end=False): # ответ Алисы
     if buttons is None:
         buttons = ["Steam", "Epic Games", "Распродажи", "Помощь"]
 
@@ -233,13 +233,13 @@ def build_alice_json(req, text, buttons=None, end=False):
     return jsonify(res)
 
 
-def get_stats_summary():
+def get_stats_summary(): # статистика(логично)
     u_count = User.query.count()
     q_count = PriceCache.query.count()
     return f"Всего пользователей в системе {u_count}. Обработано уникальных запросов {q_count}."
 
 
-def check_blacklist(text):
+def check_blacklist(text): # проверка ЧС
     words = text.split()
     for w in words:
         match = Blacklist.query.filter_by(word=w).first()
@@ -248,7 +248,7 @@ def check_blacklist(text):
     return False
 
 
-def format_long_text(text_list):
+def format_long_text(text_list): # -_-
     return "\n".join(text_list)
 
 
@@ -272,14 +272,14 @@ def generate_random_tip():
     return random.choice(tips)
 
 
-def log_event(name, level="info"):
+def log_event(name, level="info"): # лог
     if level == "info":
         app.logger.info(f"Событие {name} зафиксировано.")
     else:
         app.logger.warning(f"Внимание {name} требует проверки.")
 
 
-def handle_user_context(user_record):
+def handle_user_context(user_record): # последняя активность юзера
     if not user_record:
         return "Ранее вы не заходили в приложение."
     last_action = user_record.last_store or user_record.last_query or "просмотр общей информации"
@@ -287,7 +287,7 @@ def handle_user_context(user_record):
 
 
 @app.route('/post', methods=['POST'])
-def entry_point():
+def entry_point(): # ответы Алисы
     data = request.json
     if not data:
         return "Bad request", 400
@@ -297,7 +297,7 @@ def entry_point():
     req_obj = data.get('request', {})
     cmd = req_obj.get('command', '').lower().strip()
 
-    if sess.get('new'):
+    if sess.get('new'): # если новая
         u_record = User.query.filter_by(uid=u_id).first()
         if u_record:
             old_stuff = u_record.last_store or u_record.last_query or "поиском игр"
@@ -360,17 +360,17 @@ def entry_point():
                             "Запрос не распознан. Попробуйте переформулировать или воспользуйтесь разделом Помощь.")
 
 
-@app.errorhandler(404)
+@app.errorhandler(404) # не найдена
 def not_found_route(e):
     return jsonify({"status": "error", "msg": "not found"}), 404
 
 
-@app.errorhandler(405)
+@app.errorhandler(405) # не разрешен метод
 def method_not_allowed(e):
     return jsonify({"status": "error", "msg": "method not allowed"}), 405
 
 
-@app.errorhandler(500)
+@app.errorhandler(500) # внутренняя ошибка
 def server_crash(e):
     app.logger.critical(f"Critical error: {e}")
     fail_res = {
@@ -383,7 +383,7 @@ def server_crash(e):
     return jsonify(fail_res), 500
 
 
-def maintenance_task():
+def maintenance_task(): # удаляет кеш старше суток
     try:
         PriceCache.query.filter(PriceCache.created_at < time.time() - 86400).delete()
         db.session.commit()
@@ -410,7 +410,7 @@ def final_cleanup():
     except Exception as e:
         app.logger.error(f"Ошибка при очистке сессий: {e}")
 
-def check_environment():
+def check_environment(): # проверка окружения
     required_vars = ['SQLALCHEMY_DATABASE_URI']
     for var in required_vars:
         if var not in app.config:
@@ -439,12 +439,12 @@ def verify_api_keys():
     except:
         return False
 
-def backup_db():
+def backup_db(): # копия БД (рзерв)
     import shutil
     if os.path.exists('skill_data.db'):
         shutil.copy('skill_data.db', 'skill_data.db.bak')
 
-def rotate_temp_files():
+def rotate_temp_files(): # ротация логов
     if os.path.exists(log_path):
         size = os.path.getsize(log_path)
         if size > 1024 * 1024:
@@ -473,7 +473,7 @@ def sync_stores():
     except:
         pass
 
-def update_priority_sales():
+def update_priority_sales(): # обновление приоритетов
     Sales.query.filter(Sales.prob > 90).update({Sales.priority: 1})
     db.session.commit()
 
