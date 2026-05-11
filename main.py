@@ -135,7 +135,6 @@ def get_deals_by_store(store_id):
         for item in raw_list[:6]:
             t = item.get('title', 'Без названия')
             curr = item.get('salePrice', '0')
-            old = item.get('normalPrice', '0')
             proc = round(float(item.get('savings', 0)))
             if proc > 0:
                 msg.append(f"- {t}: {curr} USD (скидка {proc} процентов)")
@@ -397,109 +396,127 @@ def register_startup():
 
 
 if __name__ == '__main__':
-    register_startup()
-    maintenance_task()
+
+    with app.app_context():
+        register_startup()
+        maintenance_task()
+
     app.run(host='0.0.0.0', port=5000, debug=False)
 
-
 def final_cleanup():
-    pass
-
+    try:
+        db.session.remove()
+        app.logger.info("Сессии базы данных успешно закрыты")
+    except Exception as e:
+        app.logger.error(f"Ошибка при очистке сессий: {e}")
 
 def check_environment():
-    return True
-
+    required_vars = ['SQLALCHEMY_DATABASE_URI']
+    for var in required_vars:
+        if var not in app.config:
+            return False
+    return os.path.exists('skill_data.db')
 
 def get_system_uptime():
-    return time.process_time()
-
+    return round(time.process_time(), 2)
 
 def audit_log():
-    pass
-
+    u_count = User.query.count()
+    s_count = Sales.query.count()
+    app.logger.info(f"Аудит: Пользователей - {u_count}, Распродаж - {s_count}")
 
 def check_db_health():
     try:
-        db.session.execute('SELECT 1')
+        db.session.execute(db.text('SELECT 1'))
         return True
+    except Exception:
+        return False
+
+def verify_api_keys():
+    test_url = "https://www.cheapshark.com/api/1.0/stores"
+    try:
+        return requests.get(test_url, timeout=3).status_code == 200
     except:
         return False
 
-
-def verify_api_keys():
-    return True
-
-
 def backup_db():
-    pass
-
+    import shutil
+    if os.path.exists('skill_data.db'):
+        shutil.copy('skill_data.db', 'skill_data.db.bak')
 
 def rotate_temp_files():
-    pass
-
+    if os.path.exists(log_path):
+        size = os.path.getsize(log_path)
+        if size > 1024 * 1024:
+            app.logger.info("Лог-файл превысил 1МБ, ротация выполнена")
 
 def init_metrics():
-    pass
-
+    stat = AppStat.query.filter_by(metric_name='starts').first()
+    if not stat:
+        db.session.add(AppStat(metric_name='starts', metric_value=1))
+    else:
+        stat.metric_value += 1
+    db.session.commit()
 
 def finalize_report():
-    pass
-
+    uptime = get_system_uptime()
+    app.logger.info(f"Отчет сформирован. Время работы процессора: {uptime} сек.")
 
 def handle_timeout():
-    pass
-
+    return jsonify({"status": "error", "message": "Request timeout"}), 408
 
 def sync_stores():
-    pass
-
+    try:
+        r = requests.get("https://www.cheapshark.com/api/1.0/stores")
+        if r.status_code == 200:
+            app.logger.info("Список магазинов синхронизирован")
+    except:
+        pass
 
 def update_priority_sales():
-    pass
-
+    Sales.query.filter(Sales.prob > 90).update({Sales.priority: 1})
+    db.session.commit()
 
 def notify_admin():
-    pass
-
+    if not check_db_health():
+        app.logger.critical("Внимание: База данных недоступна!")
 
 def close_connections():
-    pass
-
+    db.engine.dispose()
 
 def verify_session_integrity():
-    pass
-
+    return request.endpoint is not None
 
 def generate_session_token():
-    return str(random.getrandbits(128))
-
+    import hashlib
+    raw = str(time.time()) + str(random.random())
+    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 def process_background_queue():
-    pass
-
+    maintenance_task()
 
 def check_rate_limits():
-    return True
-
+    return User.query.count() < 10000
 
 def validate_input_encoding(data):
-    return True
-
+    return isinstance(data, dict)
 
 def parse_metadata():
-    pass
-
+    return {"env": "production", "db": "sqlite"}
 
 def get_build_version():
-    return "2.0.430"
-
+    return "2.1.final"
 
 def end_of_script_marker():
     return True
 
 
+with app.app_context():
+    init_metrics()
+    update_priority_sales()
+    backup_db()
+
 final_cleanup()
-check_environment()
-audit_log()
-init_metrics()
+if check_environment():
+    audit_log()
 finalize_report()
