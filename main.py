@@ -5,7 +5,7 @@ import time
 import random
 import re
 import os
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, date, timedelta
 from logging.handlers import RotatingFileHandler
@@ -37,19 +37,17 @@ def fix_ngrok(res):  # траблы ngrok
     res.headers['X-Content-Type-Options'] = 'nosniff'
     return res
 
-
-logging.basicConfig(level=logging.INFO)  # логи
 log_path = 'skill_v2_final.log'
-h = RotatingFileHandler(log_path, maxBytes=100000, backupCount=5)
+h = RotatingFileHandler(log_path, maxBytes=100000, backupCount=5, encoding='utf-8')
 f = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s')
 h.setFormatter(f)
+app.logger.setLevel(logging.INFO)
 app.logger.addHandler(h)
 
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///skill_data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = os.urandom(24)
 db = SQLAlchemy(app)
-
 
 # таблицы в БД
 class User(db.Model):
@@ -94,6 +92,20 @@ class AppStat(db.Model):
     metric_value = db.Column(db.Integer, default=0)
 
 
+class Favorite(db.Model):  # избранное
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(128), index=True)
+    game_name = db.Column(db.String(256))
+    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class StoreCache(db.Model):  # кеш магазинов из API
+    id = db.Column(db.Integer, primary_key=True)
+    store_id = db.Column(db.String(10), unique=True)
+    store_name = db.Column(db.String(64))
+    is_active = db.Column(db.Boolean, default=True)
+
+
 with app.app_context():
     db.create_all()  # создание таблиц
     if not Sales.query.first():
@@ -113,21 +125,15 @@ with app.app_context():
 
 
 def get_real_store_name(id_val):
-    s_map = {
-        "1": "Steam", "2": "GOG", "3": "Humble Bundle",
-        "7": "GOG Wallet", "11": "Humble Store",
-        "25": "Epic Games Store", "31": "Blizzard Shop",
-        "13": "Uplay", "15": "Origin", "27": "Gamesplanet",
-        "21": "Itch.io", "23": "GameBillet", "24": "Voidu"
-    }
-    return s_map.get(str(id_val), "Неизвестный магазин")
+    store = StoreCache.query.filter_by(store_id=str(id_val)).first()
+    return store.store_name if store else "Неизвестный магазин"
 
 
 def clean_user_text(raw_text):  # очистка от слов
     noise = [
         "найди", "пожалуйста", "алиса", "скажи", "поиск",
         "сколько", "стоит", "купить", "игру", "хочу", "запусти",
-        "мне", "надо", "отыщи", "проверь", "глянь", "покажи"
+        "мне", "надо", "отыщи", "проверь", "глянь", "покажи", "в избранное", "добавь"
     ]
     raw_text = raw_text.lower().strip()
     for w in noise:
@@ -236,7 +242,7 @@ def update_user_stat(user_id, st=None, q=None):  # статистика юзер
 
 def build_alice_json(req, text, buttons=None, end=False):  # ответ Алисы
     if buttons is None:
-        buttons = ["Steam", "Epic Games", "Распродажи", "Помощь"]
+        buttons = ["Магазины", "Избранное", "Распродажи", "Помощь"]
 
     formatted_btns = []
     for b in buttons:
@@ -274,12 +280,10 @@ def format_long_text(text_list):  # -_-
 
 
 def validate_store_request(cmd):
-    if "стим" in cmd or "steam" in cmd:
-        return 1
-    if "эпик" in cmd or "epic" in cmd:
-        return 25
-    if "гог" in cmd or "gog" in cmd:
-        return 2
+    stores = StoreCache.query.all()
+    for s in stores:
+        if s.store_name.lower() in cmd:
+            return s.store_id
     return None
 
 
@@ -309,8 +313,11 @@ def handle_user_context(user_record):  # последняя активность
 
 @app.route('/post', methods=['POST'])
 def entry_point():  # ответы Алисы
+    if not verify_session_integrity():
+        return handle_timeout()
+
     data = request.json
-    if not data:
+    if not validate_input_encoding(data):
         return "Bad request", 400
 
     sess = data.get('session', {})
@@ -321,15 +328,35 @@ def entry_point():  # ответы Алисы
     if sess.get('new'):  # если новая
         u_record = User.query.filter_by(uid=u_id).first()
         if u_record:
-            old_stuff = u_record.last_store or u_record.last_query or "поиском игр"
-            welcome = f"Здравствуйте. Рады вашему возвращению. В прошлый раз вы изучали {old_stuff}. Какую информацию найти сегодня?"
+            welcome = f"Здравствуйте. Рады вашему возвращению. {handle_user_context(u_record)} Какую информацию найти сегодня?"
         else:
-            welcome = "Здравствуйте. Это сервис мониторинга цен на видеоигры. Я могу проверить скидки в магазинах Steam, Epic Games или найти стоимость конкретной игры. Чем могу помочь?"
+            welcome = "Здравствуйте. Это сервис мониторинга цен на видеоигры. Я могу проверить скидки в популярных магазинах или найти стоимость конкретной игры. Чем могу помочь?"
         return build_alice_json(data, welcome)
 
     if not cmd:
         return build_alice_json(data,
                                 "Ожидаю вашу команду. Выберите один из предложенных магазинов или введите название игры.")
+
+    if cmd == "магазины":
+        active_stores = StoreCache.query.filter_by(is_active=True).limit(12).all()
+        s_buttons = [s.store_name for s in active_stores]
+        return build_alice_json(data, "Выберите магазин из списка ниже:", buttons=s_buttons + ["Назад"])
+
+    if cmd == "избранное":
+        favs = Favorite.query.filter_by(user_id=u_id).all()
+        if not favs:
+            return build_alice_json(data, "Ваш список избранного пока пуст. Чтобы добавить игру, скажите 'Добавь [название] в избранное'.")
+        res_list = [f"{i+1}. {f.game_name}" for i, f in enumerate(favs)]
+        return build_alice_json(data, "Ваши игры:\n" + "\n".join(res_list))
+
+    if "добавь" in cmd and "избранное" in cmd:
+        g_name = clean_user_text(cmd)
+        if g_name:
+            if not Favorite.query.filter_by(user_id=u_id, game_name=g_name).first():
+                db.session.add(Favorite(user_id=u_id, game_name=g_name))
+                db.session.commit()
+                return build_alice_json(data, f"Игра {g_name} добавлена в ваш список.")
+            return build_alice_json(data, "Эта игра уже есть в вашем списке.")
 
     store_id = validate_store_request(cmd)
     if store_id:
@@ -354,9 +381,10 @@ def entry_point():  # ответы Алисы
     if "помощь" in cmd or "че умеешь" in cmd or "умеешь" in cmd:
         h_text = (
             "Инструкция по использованию сервиса:\n"
-            "1. Назовите магазин (например, Стим), чтобы увидеть список популярных скидок.\n"
-            "2. Введите название интересующей игры для поиска лучшей цены.\n"
-            "3. Спросите про распродажи для получения календаря акций.\n"
+            "1. Нажмите 'Магазины', чтобы выбрать площадку.\n"
+            "2. Введите название игры для поиска цены.\n"
+            "3. Скажите 'Добавь [игра] в избранное' для сохранения.\n"
+            "4. Спросите про распродажи для календаря акций.\n"
             "Какое действие выполнить?"
         )
         return build_alice_json(data, h_text)
@@ -372,6 +400,8 @@ def entry_point():  # ответы Алисы
                                 "На данный момент все функции приложения доступны в полном объеме без ограничений.")
 
     if len(cmd) > 1:
+        if check_blacklist(cmd):
+            return build_alice_json(data, "Запрос содержит недопустимые слова.")
         find_res = fetch_game_data(cmd)
         if "Информация по игре" in find_res:
             update_user_stat(u_id, q=cmd)
@@ -490,11 +520,21 @@ def handle_timeout():
 
 def sync_stores():
     try:
-        r = requests.get(URL_CONFIG["stores_api"])
+        r = requests.get(URL_CONFIG["stores_api"], timeout=5)
         if r.status_code == 200:
-            app.logger.info("Список магазинов синхронизирован")
-    except:
-        pass
+            data = r.json()
+            for s in data:
+                exists = StoreCache.query.filter_by(store_id=str(s['storeID'])).first()
+                if not exists:
+                    new_s = StoreCache(store_id=str(s['storeID']), store_name=s['storeName'], is_active=bool(s['isActive']))
+                    db.session.add(new_s)
+                else:
+                    exists.store_name = s['storeName']
+                    exists.is_active = bool(s['isActive'])
+            db.session.commit()
+            app.logger.info("Список магазинов синхронизирован через API")
+    except Exception as e:
+        app.logger.error(f"Sync stores failed: {e}")
 
 
 def update_priority_sales():  # обновление приоритетов
@@ -512,7 +552,7 @@ def close_connections():
 
 
 def verify_session_integrity():
-    return request.endpoint is not None
+    return request.endpoint is not None or app.debug
 
 
 def generate_session_token():
@@ -534,7 +574,7 @@ def validate_input_encoding(data):
 
 
 def parse_metadata():
-    return {"env": "production", "db": "sqlite"}
+    return {"env": "production", "db": "sqlite", "version": get_build_version()}
 
 
 def get_build_version():
@@ -545,16 +585,19 @@ def end_of_script_marker():
     return True
 
 
-if __name__ == '__main__':#запуск
+if __name__ == '__main__':  # запуск
     with app.app_context():
         register_startup()
         init_metrics()
+        sync_stores()
         update_priority_sales()
         backup_db()
         maintenance_task()
-        sync_stores()
         if check_environment():
             audit_log()
+        notify_admin()
         finalize_report()
+        print(f"Metadata: {parse_metadata()}")
     app.run(host='0.0.0.0', port=5000, debug=False)
+    close_connections()
     final_cleanup()
