@@ -242,7 +242,7 @@ def update_user_stat(user_id, st=None, q=None):  # статистика юзер
 
 def build_alice_json(req, text, buttons=None, end=False):  # ответ Алисы
     if buttons is None:
-        buttons = ["Во что поиграть?", "Магазины", "Избранное", "Распродажи", "Помощь"]
+        buttons = ["Во что поиграть?", "Категории", "Магазины", "Избранное", "Распродажи", "Помощь"]
 
     formatted_btns = []
     for b in buttons:
@@ -310,14 +310,17 @@ def handle_user_context(user_record):  # последняя активность
     last_action = user_record.last_store or user_record.last_query or "просмотр общей информации"
     return f"В последний раз вы интересовались следующим {last_action}."
 
-def get_random_recommendation(): # рекомендация игры
+def get_random_recommendation(filter_query=None): # рекомендация игры
     try:
         usd_rate = get_usd_rate()
         api_url = f"{URL_CONFIG['deals_api']}?metacritic=80&lowerPrice=0&onSale=1&pageSize=30"
+        if filter_query:
+            api_url += f"&title={filter_query}"
         resp = requests.get(api_url, timeout=7)
         if resp.status_code == 200:
             deals = resp.json()
-            good_deals = [d for d in deals if float(d.get('savings', 0)) > 50]
+            min_savings = 30 if filter_query else 50
+            good_deals = [d for d in deals if float(d.get('savings', 0)) > min_savings]
             if good_deals:
                 pick = random.choice(good_deals)
                 title = pick.get('title', 'Интересная игра')
@@ -325,9 +328,10 @@ def get_random_recommendation(): # рекомендация игры
                 discount = round(float(pick.get('savings', 0)))
                 store = get_real_store_name(pick.get('storeID'))
                 rating = pick.get('metacriticScore', 'высокий')
-                return (f"Рекомендую обратить внимание на {title}. "
-                        f"У неё отличный рейтинг ({rating}) и сейчас скидка {discount}%. "
-                        f"В магазине {store} она стоит всего {price_rub} руб.")
+                prefix = f"В категории '{filter_query}' рекомендую: " if filter_query else "Случайный выбор для вас: "
+                return (f"{prefix}{title}. "
+                        f"Рейтинг: {rating}/100. Сейчас скидка {discount}%. "
+                        f"В {store} цена составляет {price_rub} руб.")
         return "Не удалось подобрать игру. Попробуйте позже или загляните в раздел Магазины."
     except Exception as e:
         app.logger.error(f"Rec error: {e}")
@@ -424,6 +428,22 @@ def entry_point():  # ответы Алисы
     if "премиум" in cmd or "подписка" in cmd:
         return build_alice_json(data,
                                 "На данный момент все функции приложения доступны в полном объеме без ограничений.")
+
+    if cmd == "категории":
+        cat_btns = ["Шутеры", "РПГ", "Хорроры", "Для слабых ПК", "Назад"]
+        return build_alice_json(data, "Выберите жанр для подбора отличных игр со скидками:", buttons=cat_btns)
+
+    if "шутеры" in cmd:
+        return build_alice_json(data, get_random_recommendation("shooter"))
+
+    if "рпг" in cmd or "rpg" in cmd:
+        return build_alice_json(data, get_random_recommendation("rpg"))
+
+    if "хорроры" in cmd or "horror" in cmd:
+        return build_alice_json(data, get_random_recommendation("horror"))
+
+    if "слабых пк" in cmd:
+        return build_alice_json(data, get_random_recommendation("edition"))
 
     if len(cmd) > 1:
         if check_blacklist(cmd):
