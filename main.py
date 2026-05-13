@@ -242,7 +242,7 @@ def update_user_stat(user_id, st=None, q=None):  # статистика юзер
 
 def build_alice_json(req, text, buttons=None, end=False):  # ответ Алисы
     if buttons is None:
-        buttons = ["Магазины", "Избранное", "Распродажи", "Помощь"]
+        buttons = ["Во что поиграть?", "Магазины", "Избранное", "Распродажи", "Помощь"]
 
     formatted_btns = []
     for b in buttons:
@@ -310,6 +310,28 @@ def handle_user_context(user_record):  # последняя активность
     last_action = user_record.last_store or user_record.last_query or "просмотр общей информации"
     return f"В последний раз вы интересовались следующим {last_action}."
 
+def get_random_recommendation(): # рекомендация игры
+    try:
+        usd_rate = get_usd_rate()
+        api_url = f"{URL_CONFIG['deals_api']}?metacritic=80&lowerPrice=0&onSale=1&pageSize=30"
+        resp = requests.get(api_url, timeout=7)
+        if resp.status_code == 200:
+            deals = resp.json()
+            good_deals = [d for d in deals if float(d.get('savings', 0)) > 50]
+            if good_deals:
+                pick = random.choice(good_deals)
+                title = pick.get('title', 'Интересная игра')
+                price_rub = round(float(pick.get('salePrice', 0)) * usd_rate)
+                discount = round(float(pick.get('savings', 0)))
+                store = get_real_store_name(pick.get('storeID'))
+                rating = pick.get('metacriticScore', 'высокий')
+                return (f"Рекомендую обратить внимание на {title}. "
+                        f"У неё отличный рейтинг ({rating}) и сейчас скидка {discount}%. "
+                        f"В магазине {store} она стоит всего {price_rub} руб.")
+        return "Не удалось подобрать игру. Попробуйте позже или загляните в раздел Магазины."
+    except Exception as e:
+        app.logger.error(f"Rec error: {e}")
+        return "Произошла ошибка при подборе рекомендации."
 
 @app.route('/post', methods=['POST'])
 def entry_point():  # ответы Алисы
@@ -341,6 +363,10 @@ def entry_point():  # ответы Алисы
         active_stores = StoreCache.query.filter_by(is_active=True).limit(12).all()
         s_buttons = [s.store_name for s in active_stores]
         return build_alice_json(data, "Выберите магазин из списка ниже:", buttons=s_buttons + ["Назад"])
+
+    if "во что поиграть" in cmd:
+        rec_text = get_random_recommendation()
+        return build_alice_json(data, rec_text)
 
     if cmd == "избранное":
         favs = Favorite.query.filter_by(user_id=u_id).all()
