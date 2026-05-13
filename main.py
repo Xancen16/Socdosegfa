@@ -242,7 +242,7 @@ def update_user_stat(user_id, st=None, q=None):  # статистика юзер
 
 def build_alice_json(req, text, buttons=None, end=False):  # ответ Алисы
     if buttons is None:
-        buttons = ["Во что поиграть?", "Категории", "Магазины", "Избранное", "Распродажи", "Помощь"]
+        buttons = ["Во что поиграть?", "Категории", "Игра дня", "До 500 рублей", "Халява 0_-", "Магазины", "Избранное", "Распродажи", "Помощь"]
 
     formatted_btns = []
     for b in buttons:
@@ -388,6 +388,21 @@ def entry_point():  # ответы Алисы
                 return build_alice_json(data, f"Игра {g_name} добавлена в ваш список.")
             return build_alice_json(data, "Эта игра уже есть в вашем списке.")
 
+    if "67" in cmd or "six seven" in cmd or "сикс севен" in cmd or "шесть семь" in cmd:
+        return build_alice_json(data, "Да какой сикс севен!?")
+
+    if "игра дня" in cmd:
+        report = get_game_of_the_day()
+        return build_alice_json(data, report)
+
+    budget_match = re.search(r'(\d+)\s*(?:руб|рублей|р)?', cmd)
+    if "купить на" in cmd or "до" in cmd and budget_match:
+        amount = budget_match.group(1)
+        return build_alice_json(data, get_games_by_budget(amount))
+
+    if "экономия" in cmd or "бесплатн" in cmd or "халява" in cmd:
+        return build_alice_json(data, get_free_games())
+
     store_id = validate_store_request(cmd)
     if store_id:
         rep = get_deals_by_store(store_id)
@@ -486,6 +501,72 @@ def maintenance_task():  # удаляет кеш старше суток
         db.session.commit()
     except:
         db.session.rollback()
+
+
+def get_game_of_the_day():
+    try:
+        usd_rate = get_usd_rate()
+        api_url = f"{URL_CONFIG['deals_api']}?sortBy=Savings&pageSize=1&onSale=1"
+        resp = requests.get(api_url, timeout=7)
+        if resp.status_code == 200:
+            deals = resp.json()
+            if deals:
+                game = deals[0]
+                title = game.get('title')
+                sale_price = round(float(game.get('salePrice', 0)) * usd_rate)
+                normal_price = round(float(game.get('normalPrice', 0)) * usd_rate)
+                savings = round(float(game.get('savings', 0)))
+                store = get_real_store_name(game.get('storeID'))
+                return (f"Игра дня: {title}!\n"
+                        f"Скидка целых {savings}% в магазине {store}.\n"
+                        f"Старая цена: {normal_price} руб. Сейчас всего: {sale_price} руб!")
+        return "Не удалось определить игру дня. Попробуйте чуть позже."
+    except Exception as e:
+        app.logger.error(f"Game of the day error: {e}")
+        return "Ошибка при поиске лучшего предложения."
+
+
+def get_games_by_budget(budget_rub):
+    try:
+        usd_rate = get_usd_rate()
+        max_usd = float(budget_rub) / usd_rate
+        api_url = f"{URL_CONFIG['deals_api']}?upperPrice={max_usd}&metacritic=70&pageSize=10&onSale=1"
+        resp = requests.get(api_url, timeout=7)
+        if resp.status_code == 200:
+            deals = resp.json()
+            if not deals:
+                return f"На {budget_rub} руб. сейчас сложно найти что-то стоящее с высоким рейтингом. Попробуй чуть позже!"
+            random.shuffle(deals)
+            selection = deals[:3]
+            res = [f"Вот что можно взять на {budget_rub} рублей:"]
+            for d in selection:
+                price_rub = round(float(d['salePrice']) * usd_rate)
+                shop = get_real_store_name(d['storeID'])
+                res.append(f"• {d['title']} за {price_rub} руб. в {shop}")
+            return "\n".join(res)
+        return "Не удалось связаться с сервером цен. Давай попробуем еще раз?"
+    except Exception as e:
+        app.logger.error(f"Budget search error: {e}")
+        return "Я запуталась в цифрах... Напиши сумму просто числом, например: 500."
+
+
+def get_free_games():
+    try:
+        api_url = f"{URL_CONFIG['deals_api']}?upperPrice=0&pageSize=5"
+        resp = requests.get(api_url, timeout=5)
+        if resp.status_code == 200:
+            freebies = resp.json()
+            if not freebies:
+                return "На данный момент 100% скидок не найдено. Но можно заглянуть в раздел 'Дешево'!"
+            res = ["Актуальная халява:"]
+            for game in freebies:
+                shop = get_real_store_name(game['storeID'])
+                res.append(f"• {game['title']} в магазине {shop}")
+            res.append("\nУспей забрать, пока акция не закончилась!")
+            return "\n".join(res)
+        return "Не удалось проверить списки бесплатных игр."
+    except:
+        return "Ошибка при поиске халявы. Попробуй позже."
 
 
 def register_startup():
