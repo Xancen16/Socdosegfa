@@ -12,6 +12,27 @@ from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 
+YANDEX_CONFIG = {
+    "skill_id": "498a9f1b-b89f-46ca-8ea0-5f68e7c24c10",
+    "oauth_token": "49636d3f79ea4b9399a44b7d9e59319e"
+}#не могу сделать токен хз в чем проблема
+
+def upload_image_to_yandex(image_url):
+    try:
+        img_resp = requests.get(image_url, timeout=5)
+        if img_resp.status_code != 200:#скачиваем картинку из чипшарка
+            return None
+        url = f"https://dialogs.yandex.net/api/v1/skills/{YANDEX_CONFIG['skill_id']}/images"
+        headers = {"Authorization": f"OAuth {YANDEX_CONFIG['oauth_token']}"}
+        files = {'file': ('image.jpg', img_resp.content)}#отправляем файл в апи яндекса
+
+        post_resp = requests.post(url, headers=headers, files=files)
+        if post_resp.status_code == 201:
+            return post_resp.json().get('image', {}).get('id')
+    except Exception as e:
+        app.logger.error(f"Ошибка загрузки картинки: {e}")
+    return None
+
 URL_CONFIG = {
     "deals_api": "https://www.cheapshark.com/api/1.0/deals",
     "games_api": "https://www.cheapshark.com/api/1.0/games",
@@ -61,7 +82,6 @@ class User(db.Model):
     user_level = db.Column(db.Integer, default=1)  # на будущее
     total_requests = db.Column(db.Integer, default=0)
 
-
 class Sales(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     provider = db.Column(db.String(64))
@@ -97,7 +117,6 @@ class Favorite(db.Model):  # избранное
     user_id = db.Column(db.String(128), index=True)
     game_name = db.Column(db.String(256))
     added_at = db.Column(db.DateTime, default=datetime.utcnow)
-
 
 class StoreCache(db.Model):  # кеш магазинов из API
     id = db.Column(db.Integer, primary_key=True)
@@ -204,31 +223,45 @@ def fetch_game_data(title):
 
         best = d_data['deals'][0]
         s_name = get_real_store_name(best['storeID'])
-        p = round(usd_rate * float(best['price']))  # Исправлено: float для цены
+        p = round(usd_rate * float(best['price']))
+        image_url = s_data[0].get('thumb', '')
 
         out = f"Информация по игре {full_t}\nЛучшая цена зафиксирована в {s_name}\nТекущая стоимость составляет {p} Руб"
 
         if c_check:
-            c_check.json_data = json.dumps({'val': out})
+            c_check.json_data = json.dumps({'val': out, 'img': image_url})
             c_check.created_at = time.time()
         else:
-            new_c = PriceCache(search_key=title, json_data=json.dumps({'val': out}))
+            new_c = PriceCache(search_key=title, json_data=json.dumps({'val': out, 'img': image_url}))
             db.session.add(new_c)
-
         db.session.commit()
-        return out
+
+        #возвращаются данные для карточки
+        return {"text": out, "image_url": image_url, "title": full_t}
+
     except Exception as e:
         app.logger.error(f"Search fail: {e}")
         return "Произошла системная ошибка при обработке данных."
 
+def get_user_rank(request_count):#мастерство экономии
+    if request_count < 5:
+        return "Новичок 👶"
+    elif request_count < 15:
+        return "Геймер 🎮"
+    elif request_count < 30:
+        return "Охотник за скидками 🏹"
+    elif request_count < 50:
+        return "Мастер экономии 💰"
+    else:
+        return "Легенда распродаж 🏆"
 
-def update_user_stat(user_id, st=None, q=None):  # статистика юзера
+
+def update_user_stat(user_id, st=None, q=None): #статистика юзера
     try:
         u = User.query.filter_by(uid=user_id).first()
         if u:
             u.last_seen = datetime.utcnow()
-            u.sessions_count += 1
-            u.total_requests += 1
+            u.total_requests += 1  # Увеличиваем прогресс в мастерстве
             if st: u.last_store = st
             if q: u.last_query = q
         else:
@@ -240,9 +273,9 @@ def update_user_stat(user_id, st=None, q=None):  # статистика юзер
         db.session.rollback()
 
 
-def build_alice_json(req, text, buttons=None, end=False):  # ответ Алисы
+def build_alice_json(req, text, buttons=None, end=False, card_data=None):
     if buttons is None:
-        buttons = ["Во что поиграть?", "Категории", "Игра дня", "До 500 рублей", "Халява 0_-", "Магазины", "Избранное", "Распродажи", "Помощь"]
+        buttons = ["Во что поиграть?", "Мой уровень", "Магазины", "Игра дня", "До 500 рублей", "Распродажи", "Помощь"]
 
     formatted_btns = []
     for b in buttons:
@@ -257,8 +290,16 @@ def build_alice_json(req, text, buttons=None, end=False):  # ответ Алис
             "end_session": end
         }
     }
-    return jsonify(res)
 
+    if card_data:#если передались данные о картинке добавляем в ответ
+        res["response"]["card"] = {
+            "type": "BigImage",
+            "image_id": card_data['image'],
+            "title": card_data['title'],
+            "description": text
+        }
+
+    return jsonify(res)
 
 def get_stats_summary():  # статистика(логично)
     u_count = User.query.count()
@@ -351,22 +392,58 @@ def entry_point():  # ответы Алисы
     req_obj = data.get('request', {})
     cmd = req_obj.get('command', '').lower().strip()
 
-    if sess.get('new'):  # если новая
+    if sess.get('new'):
         u_record = User.query.filter_by(uid=u_id).first()
         if u_record:
-            welcome = f"Здравствуйте. Рады вашему возвращению. {handle_user_context(u_record)} Какую информацию найти сегодня?"
+            current_rank = get_user_rank(u_record.total_requests or 0)
+
+            welcome = (f"Здравствуйте! Рады вашему возвращению.\n"
+                       f"Ваш текущий статус: {current_rank}.\n"
+                       f"Какую игру или магазин проверим сегодня?")
         else:
-            welcome = "Здравствуйте. Это сервис мониторинга цен на видеоигры. Я могу проверить скидки в популярных магазинах или найти стоимость конкретной игры. Чем могу помочь?"
+            welcome = "Здравствуйте! Это сервис мониторинга цен на видеоигры. Какую информацию найти хотите сегодня?"
         return build_alice_json(data, welcome)
 
     if not cmd:
         return build_alice_json(data,
                                 "Ожидаю вашу команду. Выберите один из предложенных магазинов или введите название игры.")
 
+    intents = req_obj.get('nlu', {}).get('intents', {})#не ищет игры с названием да нет
+    if 'YANDEX.CONFIRM' in intents:
+        return build_alice_json(data, "Отлично! Что делаем дальше?")
+    if 'YANDEX.REJECT' in intents or cmd == "назад":
+        return build_alice_json(data, "Возвращаемся в главное меню.", buttons=None)
+
     if cmd == "магазины":
         active_stores = StoreCache.query.filter_by(is_active=True).limit(12).all()
         s_buttons = [s.store_name for s in active_stores]
         return build_alice_json(data, "Выберите магазин из списка ниже:", buttons=s_buttons + ["Назад"])
+
+    if "уровень" in cmd or "мой лвл" in cmd or "статус" in cmd:
+        u_record = User.query.filter_by(uid=u_id).first()
+        req_count = u_record.total_requests if u_record else 0
+        rank = get_user_rank(req_count)
+
+        if req_count < 5:
+            next_lvl = 5 - req_count
+            goal = "Геймер"
+        elif req_count < 15:
+            next_lvl = 15 - req_count
+            goal = "Охотник за скидками"
+        elif req_count < 30:
+            next_lvl = 30 - req_count
+            goal = "Мастер экономии"
+        else:
+            next_lvl = 0
+            goal = "Максимум"
+
+        msg = f"Ваш текущий ранг: {rank}.\nВсего запросов выполнено: {req_count}."
+        if next_lvl > 0:
+            msg += f"\nДо статуса '{goal}' осталось запросов: {next_lvl}."
+        else:
+            msg += "\nВы достигли высшего звания! Поздравляем!"
+
+        return build_alice_json(data, msg)
 
     if "во что поиграть" in cmd:
         rec_text = get_random_recommendation()
@@ -461,16 +538,22 @@ def entry_point():  # ответы Алисы
         return build_alice_json(data, get_random_recommendation("edition"))
 
     if len(cmd) > 1:
-        if check_blacklist(cmd):
-            return build_alice_json(data, "Запрос содержит недопустимые слова.")
         find_res = fetch_game_data(cmd)
-        if "Информация по игре" in find_res:
+
+        if isinstance(find_res, dict):
             update_user_stat(u_id, q=cmd)
+
+            y_img_id = upload_image_to_yandex(find_res['image_url'])
+
+            card = None
+            if y_img_id:
+                card = {
+                    "image": y_img_id,
+                    "title": find_res['title']
+                }
+            return build_alice_json(data, find_res['text'], card_data=card)
+
         return build_alice_json(data, find_res)
-
-    return build_alice_json(data,
-                            "Запрос не распознан. Попробуйте переформулировать или воспользуйтесь разделом Помощь.")
-
 
 @app.errorhandler(404)  # не найдена
 def not_found_route(e):
