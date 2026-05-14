@@ -275,7 +275,7 @@ def update_user_stat(user_id, st=None, q=None): #статистика юзера
 
 def build_alice_json(req, text, buttons=None, end=False, card_data=None):
     if buttons is None:
-        buttons = ["Во что поиграть?", "Мой уровень", "Магазины", "Игра дня", "До 500 рублей", "Распродажи", "Помощь"]
+        buttons = ["Во что поиграть?", "Мой уровень", "Магазины", "Игра дня", "До 500 рублей", "Распродажи", 'Помощь', 'Совет', 'Категории', 'Избранное']
 
     formatted_btns = []
     for b in buttons:
