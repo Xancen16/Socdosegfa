@@ -1,4 +1,4 @@
-from cleaner import clean_user_text
+from utils.cleaner import clean_user_text
 
 
 class GamesHandler:

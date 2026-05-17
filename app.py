@@ -2,18 +2,18 @@ from flask import Flask, jsonify
 from config import Config
 from models_of_bd import db, Sales, StoreCache, PriceCache, User, Favorite, AppStat
 from ngrokfix import fix_ngrok_headers
-from logging_custom import setup_logger
-from bd_work import init_metrics, backup_db, maintenance_task, check_db_health
-from d_r_mod import CurrencyService
-from shops import CheapSharkService
-from dialogsY import YandexService
-from cache import CacheService
-from commands import UserHandler
-from commands2 import StoresHandler
-from commands3 import GamesHandler
-from commands4 import SalesHandler
-from recomm import RecommendationsHandler
-from alice import MainHandler
+from utils.logging_custom import setup_logger
+from utils. bd_work import init_metrics, backup_db, maintenance_task, check_db_health
+from services.d_r_mod import CurrencyService
+from services.shops import CheapSharkService
+from services.dialogsY import YandexService
+from services.cache import CacheService
+from handlers.commands import UserHandler
+from handlers.commands2 import StoresHandler
+from handlers.commands3 import GamesHandler
+from handlers.commands4 import SalesHandler
+from handlers.recomm import RecommendationsHandler
+from handlers.alice import MainHandler
 
 
 def create_app():

@@ -1,8 +1,8 @@
 from flask import request, jsonify
 from config import InitialDataConfig
-from cleaner import extract_budget
-from datatest import validate_input_encoding
-from bd_work import get_stats_summary
+from utils.cleaner import extract_budget
+from utils.datatest import validate_input_encoding
+from utils.bd_work import get_stats_summary
 
 
 class MainHandler:
